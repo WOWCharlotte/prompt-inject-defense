@@ -2,7 +2,7 @@
 
 Usage:
     python scripts/evaluate.py --dataset injecagent --setting base --max-cases 10
-    python scripts/evaluate.py --dataset injecagent --setting enhanced
+    python scripts/evaluate.py --dataset injecagent --setting enhanced --no-rag
 """
 
 from __future__ import annotations
@@ -16,6 +16,17 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# Load .env file if present
+_env_path = PROJECT_ROOT / ".env"
+if _env_path.exists():
+    import os
+
+    for line in _env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
 
 from intent_shield import IntentShield, ShieldConfig
 
@@ -48,25 +59,34 @@ def main():
     )
     parser.add_argument(
         "--llm-model",
-        default="gpt-4o-mini",
-        help="LLM model for the judge",
+        default=None,
+        help="LLM model for the judge (default: from .env or gpt-4o-mini)",
     )
     parser.add_argument(
         "--llm-base-url",
-        default="https://api.openai.com/v1",
-        help="LLM API base URL",
+        default=None,
+        help="LLM API base URL (default: from .env or https://api.openai.com/v1)",
     )
     parser.add_argument(
         "--output",
         default=None,
         help="Output file for results (JSON)",
     )
+    parser.add_argument(
+        "--no-rag",
+        action="store_true",
+        help="Disable RAG (no vector DB, no embedding/reranking)",
+    )
     args = parser.parse_args()
 
-    config = ShieldConfig(
-        llm_base_url=args.llm_base_url,
-        llm_model=args.llm_model,
-    )
+    # Build config: CLI args override .env, which overrides defaults
+    config_kwargs = {"rag_enabled": not args.no_rag}
+    if args.llm_base_url:
+        config_kwargs["llm_base_url"] = args.llm_base_url
+    if args.llm_model:
+        config_kwargs["llm_model"] = args.llm_model
+
+    config = ShieldConfig(**config_kwargs)
     shield = IntentShield(config)
 
     if args.dataset == "injecagent":

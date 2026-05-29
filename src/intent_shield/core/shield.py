@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from intent_shield.config import ShieldConfig
-from intent_shield.core.judge import IntentJudge
+from intent_shield.core.judge import IntentJudge, JudgeTrace
 from intent_shield.embed.siliconflow import SiliconFlowEmbedder, SiliconFlowReranker
 from intent_shield.llm.openai_compat import OpenAICompatLLM
 from intent_shield.reflection.rag import ThreatRAG
@@ -47,30 +47,6 @@ class IntentShield:
             model=config.llm_model,
         )
 
-        # Embedder & Reranker
-        self._embedder = SiliconFlowEmbedder(
-            base_url=config.embed_base_url,
-            api_key=config.embed_api_key,
-            model=config.embed_model,
-        )
-        self._reranker = SiliconFlowReranker(
-            base_url=config.embed_base_url,
-            api_key=config.embed_api_key,
-            model=config.reranker_model,
-        )
-
-        # Vector store & RAG
-        self._store = ThreatStore(
-            persist_dir=config.chroma_persist_dir,
-            collection_name=config.chroma_collection_name,
-            embedder=self._embedder,
-        )
-        self._rag = ThreatRAG(
-            store=self._store,
-            reranker=self._reranker,
-            top_k=config.top_k,
-        )
-
         # Judge
         self._judge = IntentJudge(
             llm=self._llm,
@@ -79,8 +55,33 @@ class IntentShield:
             beta=config.beta,
         )
 
-        # Reflector
-        self._reflector = Reflector(llm=self._llm, store=self._store)
+        # RAG components (only initialized when enabled)
+        self._rag: ThreatRAG | None = None
+        self._store: ThreatStore | None = None
+        self._reflector: Reflector | None = None
+
+        if config.rag_enabled:
+            embedder = SiliconFlowEmbedder(
+                base_url=config.embed_base_url,
+                api_key=config.embed_api_key,
+                model=config.embed_model,
+            )
+            reranker = SiliconFlowReranker(
+                base_url=config.embed_base_url,
+                api_key=config.embed_api_key,
+                model=config.reranker_model,
+            )
+            self._store = ThreatStore(
+                persist_dir=config.chroma_persist_dir,
+                collection_name=config.chroma_collection_name,
+                embedder=embedder,
+            )
+            self._rag = ThreatRAG(
+                store=self._store,
+                reranker=reranker,
+                top_k=config.top_k,
+            )
+            self._reflector = Reflector(llm=self._llm, store=self._store)
 
     def judge(
         self,
@@ -89,11 +90,23 @@ class IntentShield:
         tool_params: dict[str, Any],
     ) -> ShieldDecision:
         """Core defense: judge whether a tool call aligns with user intent."""
-        # Step 1: RAG retrieval
-        rag_cases = self._rag.retrieve(user_instruction, tool_name, tool_params)
+        trace = self.judge_with_trace(user_instruction, tool_name, tool_params)
+        return trace.decision
 
-        # Step 2-4: LLM judge + decision
-        decision = self._judge.judge(
+    def judge_with_trace(
+        self,
+        user_instruction: str,
+        tool_name: str,
+        tool_params: dict[str, Any],
+    ) -> JudgeTrace:
+        """Judge with full trace (prompt messages + raw LLM response)."""
+        # Step 1: RAG retrieval (skip if disabled)
+        rag_cases = []
+        if self._rag is not None:
+            rag_cases = self._rag.retrieve(user_instruction, tool_name, tool_params)
+
+        # Step 2-4: LLM judge + decision (with trace)
+        trace = self._judge.judge_with_trace(
             user_instruction=user_instruction,
             tool_name=tool_name,
             tool_params=tool_params,
@@ -105,13 +118,13 @@ class IntentShield:
             user_instruction=user_instruction,
             tool_name=tool_name,
             tool_params=tool_params,
-            decision=decision,
+            decision=trace.decision,
             rag_cases_used=len(rag_cases),
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
         self.audit_log.append(record)
 
-        return decision
+        return trace
 
     def guard(self, func: Callable | None = None):
         """Decorator that guards a tool-calling function.
@@ -153,8 +166,10 @@ class IntentShield:
         tool_name: str,
         tool_params: dict[str, Any],
         initial_thought: str = "",
-    ) -> ReflectionCase:
+    ) -> ReflectionCase | None:
         """Stream mode: report a single false negative for immediate reflection."""
+        if self._reflector is None:
+            return None
         sample = FalseNegativeSample(
             user_instruction=user_instruction,
             tool_name=tool_name,
@@ -167,10 +182,10 @@ class IntentShield:
         """Batch mode: collect false negatives from audit log and reflect.
 
         Args:
-            ground_truths: mapping of audit_log index → "malicious"/"benign".
+            ground_truths: mapping of audit_log index -> "malicious"/"benign".
                 If None, all "safe" decisions are assumed correct (no reflection).
         """
-        if ground_truths is None:
+        if ground_truths is None or self._reflector is None:
             return []
 
         false_negatives = []
