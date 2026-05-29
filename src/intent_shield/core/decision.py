@@ -38,7 +38,9 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     """Try multiple strategies to extract JSON from LLM output."""
     # Strategy 1: direct parse
     try:
-        return json.loads(text)
+        data = json.loads(text)
+        if isinstance(data, dict) and "user_goal" in data:
+            return data
     except (json.JSONDecodeError, TypeError):
         pass
 
@@ -46,23 +48,30 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            data = json.loads(match.group(1))
+            if isinstance(data, dict) and "user_goal" in data:
+                return data
         except json.JSONDecodeError:
             pass
 
-    # Strategy 3: find first { ... } block
+    # Strategy 3: find first { ... } block (non-greedy, no nested braces)
     match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(0))
+            data = json.loads(match.group(0))
+            if isinstance(data, dict) and "user_goal" in data:
+                return data
         except json.JSONDecodeError:
             pass
 
-    # Strategy 4: greedy match for nested braces
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+    # Strategy 4: greedy match for nested braces (captures full structure)
+    match = re.search(r"(\{.*\})", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(0))
+            # Only take the first balanced JSON object (everything up to the first unmatched brace)
+            data = json.loads(match.group(1))
+            if isinstance(data, dict) and "user_goal" in data:
+                return data
         except json.JSONDecodeError:
             pass
 
