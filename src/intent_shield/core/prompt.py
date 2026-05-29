@@ -174,7 +174,7 @@ def build_judge_prompt(
     ).replace("__JSON_EXAMPLE__", """{
   "user_goal": "...",
   "tool_behavior": "...",
-  "reasoning_steps": ["...", "...", "..."],
+  "thought": "...",
   "intent_alignment": "direct | indirect | drift",
   "risk_analysis": {
     "parameter_injection": false,

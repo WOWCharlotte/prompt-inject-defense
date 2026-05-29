@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tqdm import tqdm
+
 from adapters.injecagent.formatter import classify_attack_type, extract_attack_info
 from adapters.injecagent.loader import load_test_cases
 from intent_shield.core.shield import IntentShield
@@ -96,7 +98,7 @@ class InjecAgentRunner:
 
         # Run each case and append trace
         with open(trace_path, "a", encoding="utf-8") as f:
-            for idx, case in enumerate(cases):
+            for idx, case in enumerate(tqdm(cases, desc=f"Evaluating {source_name}")):
                 user_instruction, attacker_tool, tool_params = extract_attack_info(case)
                 attack_type = classify_attack_type(case)
 

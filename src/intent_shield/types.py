@@ -61,6 +61,7 @@ class FalseNegativeSample(BaseModel):
     tool_name: str
     tool_params: dict[str, Any]
     initial_thought: str = ""
+    actual_attack_behavior: str = ""
     ground_truth: str = "malicious"
 
 
