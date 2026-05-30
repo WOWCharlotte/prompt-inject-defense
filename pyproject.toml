@@ -21,6 +21,12 @@ dev = [
     "pytest",
     "ruff",
 ]
+agentdojo = [
+    "anthropic>=0.47.0",
+    "cohere>=5.3.4",
+    "google-genai>=1.15.0",
+    "openai>=1.59.7",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,3 +41,8 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.workspace]
+members = [
+    "InjecAgent",
+]

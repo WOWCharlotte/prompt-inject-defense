@@ -1,0 +1,15 @@
+[project]
+name = "injecagent"
+version = "0.1.0"
+description = "InjecAgent: Benchmarking Indirect Prompt Injections in Tool-Integrated LLM Agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai",
+    "anthropic",
+    "transformers",
+    "torch",
+    "python-dotenv",
+    "tqdm",
+    "nltk",
+]

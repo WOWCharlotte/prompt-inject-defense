@@ -1,4 +1,9 @@
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 from src.utils import get_response_text
 import time
 class BaseModel:
@@ -37,7 +42,7 @@ class ClaudeModel(BaseModel):
     
 class GPTModel(BaseModel):
     def __init__(self, params):
-        super().__init__()  
+        super().__init__()
         from openai import OpenAI
         self.client = OpenAI(
             api_key = os.environ.get("OPENAI_API_KEY"),
@@ -59,7 +64,112 @@ class GPTModel(BaseModel):
             temperature=0
         )
         return completion.choices[0].message.content
-    
+
+
+class DeepSeekModel(BaseModel):
+    def __init__(self, params):
+        super().__init__()
+        from openai import OpenAI
+        self.client = OpenAI(
+            api_key=os.environ.get("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com"
+        )
+        self.params = params
+
+    def prepare_input(self, sys_prompt, user_prompt_filled):
+        model_input = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt_filled}
+        ]
+        return model_input
+
+    def call_model(self, model_input):
+        completion = self.client.chat.completions.create(
+            model=self.params['model_name'],
+            messages=model_input,
+            temperature=0
+        )
+        return completion.choices[0].message.content
+
+
+class QwenModel(BaseModel):
+    def __init__(self, params):
+        super().__init__()
+        from openai import OpenAI
+        self.client = OpenAI(
+            api_key=os.environ.get("DASHSCOPE_API_KEY"),
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        self.params = params
+
+    def prepare_input(self, sys_prompt, user_prompt_filled):
+        model_input = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt_filled}
+        ]
+        return model_input
+
+    def call_model(self, model_input):
+        completion = self.client.chat.completions.create(
+            model=self.params['model_name'],
+            messages=model_input,
+            temperature=0
+        )
+        return completion.choices[0].message.content
+
+
+class MiniMaxModel(BaseModel):
+    def __init__(self, params):
+        super().__init__()
+        from openai import OpenAI
+        self.client = OpenAI(
+            api_key=os.environ.get("MINIMAX_API_KEY"),
+            base_url="https://api.minimax.chat/v"
+        )
+        self.params = params
+
+    def prepare_input(self, sys_prompt, user_prompt_filled):
+        model_input = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt_filled}
+        ]
+        return model_input
+
+    def call_model(self, model_input):
+        completion = self.client.chat.completions.create(
+            model=self.params['model_name'],
+            messages=model_input,
+            temperature=0
+        )
+        return completion.choices[0].message.content
+
+
+class KimiModel(BaseModel):
+    def __init__(self, params):
+        super().__init__()
+        from openai import OpenAI
+        self.client = OpenAI(
+            api_key=os.environ.get("MOONSHOT_API_KEY"),
+            base_url="https://api.moonshot.cn/v1"
+        )
+        self.params = params
+
+    def prepare_input(self, sys_prompt, user_prompt_filled):
+        model_input = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt_filled}
+        ]
+        return model_input
+
+    def call_model(self, model_input):
+        completion = self.client.chat.completions.create(
+            model=self.params['model_name'],
+            messages=model_input,
+            temperature=0
+        )
+        return completion.choices[0].message.content
+
+
 import together   
 class TogetherAIModel(BaseModel): 
     def __init__(self, params):
@@ -124,5 +234,9 @@ MODELS = {
     "Claude": ClaudeModel,
     "GPT": GPTModel,
     "Llama": LlamaModel,
-    "TogetherAI": TogetherAIModel
+    "TogetherAI": TogetherAIModel,
+    "DeepSeek": DeepSeekModel,
+    "Qwen": QwenModel,
+    "MiniMax": MiniMaxModel,
+    "Kimi": KimiModel
 }   

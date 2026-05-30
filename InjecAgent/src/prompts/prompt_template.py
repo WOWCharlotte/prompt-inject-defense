@@ -48,6 +48,8 @@ PROMPT_TEMPLATE = {
     'codellama/CodeLlama-7b-Instruct-hf': '[INST] {sys_prompt}{user_prompt} [/INST]',
     'codellama/CodeLlama-7b-Python-hf': '[INST] {sys_prompt}{user_prompt} [/INST]',
     'deepseek-ai/deepseek-coder-33b-instruct': '',
+    'deepseek/deepseek-chat': '<|im_start|>system{sys_prompt}<|im_end|><|im_start|>user{user_prompt}<|im_end|><|im_start|>assistant',
+    'deepseek/deepseek-coder': '<|im_start|>system{sys_prompt}<|im_end|><|im_start|>user{user_prompt}<|im_end|><|im_start|>assistant',
     'garage-bAInd/Platypus2-70B-instruct': '### Instruction:\n{sys_prompt}{user_prompt}\n### Response:\n',
     'google/gemma-2b-it': '{sys_prompt}{user_prompt}',
     'google/gemma-2b': '{sys_prompt}{user_prompt}',
