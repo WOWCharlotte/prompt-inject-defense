@@ -237,25 +237,23 @@ class TraceLogger(Logger):
         directory = f"{self.dirpath}/{pipeline_name}/{suite_name}/{user_task_id}/{attack_type}"
         if not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
-        file = f"{directory}/{injection_task_id or 'none'}.json"
-        with open(file, "w") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "suite_name": suite_name,
-                        "pipeline_name": pipeline_name,
-                        "user_task_id": user_task_id,
-                        "injection_task_id": injection_task_id,
-                        "attack_type": attack_type if attack_type != "none" else None,
-                        "injections": injections,
-                        "messages": self.messages,
-                        "error": self.error,
-                        **other_context,
-                    },
-                    indent=4,
-                    default=lambda o: o.model_dump() if isinstance(o, BaseModel) else o,
-                )
-            )
+        file = f"{directory}/{injection_task_id or 'none'}.jsonl"
+
+        entry = {
+            "suite_name": suite_name,
+            "pipeline_name": pipeline_name,
+            "user_task_id": user_task_id,
+            "injection_task_id": injection_task_id,
+            "attack_type": attack_type if attack_type != "none" else None,
+            "injections": injections,
+            "messages": self.messages,
+            "error": self.error,
+            **other_context,
+        }
+
+        # Append mode: each save() call writes one JSON line
+        with open(file, "a") as f:
+            f.write(json.dumps(entry, default=lambda o: o.model_dump() if isinstance(o, BaseModel) else o) + "\n")
 
     def log_error(self, error: str):
         self.error = error

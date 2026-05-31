@@ -8,8 +8,8 @@ from intent_shield.llm.base import BaseLLM
 class OpenAICompatLLM(BaseLLM):
     """LLM client compatible with any OpenAI-format API (OpenAI, Qwen, Ollama, vLLM)."""
 
-    def __init__(self, base_url: str, api_key: str, model: str):
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60.0):
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self.model = model
 
     def chat_sync(self, messages: list[dict], temperature: float = 0.0) -> str:

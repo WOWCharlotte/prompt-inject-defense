@@ -20,8 +20,10 @@ from agentdojo.benchmark import (
     benchmark_suite_with_injections,
     benchmark_suite_without_injections,
 )
+from agentdojo.logging import OutputLogger
 from agentdojo.models import MODEL_PROVIDERS, ModelsEnum
 from agentdojo.task_suite.load_suites import get_suite
+from rich.live import Live
 
 from intent_shield import IntentShield
 
@@ -258,13 +260,17 @@ class AgentDojoRunner:
         # Create log directory for traces
         trace_dir = self.log_dir / "traces" / pipeline.name / suite_name
         trace_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  [DEBUG] Trace directory: {trace_dir}", flush=True)
 
-        # Wrap benchmark with OutputLogger to enable trace logging
-        from agentdojo.logging import OutputLogger
-        with OutputLogger(str(trace_dir)):
+        # Wrap benchmark with OutputLogger for trace logging
+        logger = OutputLogger(str(trace_dir))
+        with logger:
+            print("  [DEBUG] Starting benchmark...", flush=True)
             # Run benchmark
             if attack:
                 attacker = load_attack(attack, suite, pipeline)
+                print(f"  [DEBUG] Attack loaded: {attack}", flush=True)
+                print(f"  [DEBUG] Running benchmark_suite_with_injections...", flush=True)
                 results = benchmark_suite_with_injections(
                     pipeline,
                     suite,
@@ -275,7 +281,9 @@ class AgentDojoRunner:
                     force_rerun=force_rerun,
                     benchmark_version=benchmark_version,
                 )
+                print(f"  [DEBUG] benchmark_suite_with_injections completed", flush=True)
             else:
+                print(f"  [DEBUG] Running benchmark_suite_without_injections...", flush=True)
                 results = benchmark_suite_without_injections(
                     pipeline,
                     suite,
@@ -284,6 +292,7 @@ class AgentDojoRunner:
                     force_rerun=force_rerun,
                     benchmark_version=benchmark_version,
                 )
+                print(f"  [DEBUG] benchmark_suite_without_injections completed", flush=True)
 
         # Collect blocked counts and judge logs from IntentShieldElement
         blocked_count, judge_logs = self._collect_shield_data(pipeline)
@@ -313,6 +322,11 @@ class AgentDojoRunner:
             "blocked_tool_calls": blocked_count,
             "total_judge_calls": len(judge_logs),
             "on_suspicious": self.on_suspicious,
+            # Task details
+            "user_tasks_run": list(results["utility_results"].keys()) if results else [],
+            "injection_tasks_run": list(results.get("injection_tasks_utility_results", {}).keys()) if results else [],
+            "num_user_tasks": len(results["utility_results"]) if results else 0,
+            "num_injection_tasks": len(results.get("injection_tasks_utility_results", {})) if results else 0,
         }
 
         metrics_path = self.log_dir / f"metrics_{suite_name}_{self._run_id}.json"

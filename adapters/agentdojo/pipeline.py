@@ -105,6 +105,9 @@ class IntentShieldElement(BasePipelineElement):
 
         # Update messages in-place (preserving immutability pattern)
         messages[-1]["tool_calls"] = new_tool_calls if new_tool_calls else None
+        # Ensure content is not null when tool_calls are removed (OpenAI API requirement)
+        if not new_tool_calls and messages[-1].get("content") is None:
+            messages[-1]["content"] = [{"type": "text", "content": ""}]
 
         return query, runtime, env, messages, extra_args
 
@@ -119,11 +122,14 @@ class IntentShieldElement(BasePipelineElement):
         Default Deny security policy.
         """
         try:
-            return self.shield.judge(
+            print(f"  [IntentShield] Judging tool: {tool_call.function}", flush=True)
+            decision = self.shield.judge(
                 user_instruction=user_instruction,
                 tool_name=tool_call.function,
                 tool_params=tool_call.args,
             )
+            print(f"  [IntentShield] Result: {decision.action.value} (score={decision.risk_score})", flush=True)
+            return decision
         except Exception:
             # Conservative: block on error (Default Deny)
             from intent_shield.types import ShieldDecision
@@ -146,7 +152,7 @@ class IntentShieldElement(BasePipelineElement):
                 content = msg["content"]
                 if isinstance(content, list):
                     text_blocks = [
-                        c.get("text", "") for c in content
+                        c.get("content", "") for c in content
                         if isinstance(c, dict) and c.get("type") == "text"
                     ]
                     return "\n".join(text_blocks)
