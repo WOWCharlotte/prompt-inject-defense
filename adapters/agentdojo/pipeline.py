@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -31,6 +31,12 @@ class DetectionLog(BaseModel):
     """One post-execution detection record."""
 
     timestamp: str
+    run_id: str | None = None
+    suite_name: str | None = None
+    task_id: str | None = None
+    user_task_id: str | None = None
+    injection_task_id: str | None = None
+    model: str | None = None
     tool_name: str
     tool_args: dict[str, Any] = Field(default_factory=dict)
     user_instruction_preview: str
@@ -38,8 +44,9 @@ class DetectionLog(BaseModel):
     risk_score: float = Field(ge=0.0, le=1.0)
     thought: str
     action: RiskLevel
-    masked: bool
+    outcome: str = "none"  # "masked" | "sanitized" | "none"
     error: str | None = None
+    judge_latency_ms: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +104,49 @@ class IntentShieldElement(BasePipelineElement):
         r"do\s+not\s+follow\s+original\s+instructions",
     ]
 
-    def __init__(self, shield: Any, mask_output: bool = True) -> None:
+    def __init__(
+        self,
+        shield: Any,
+        mask_output: bool = True,
+        run_id: str | None = None,
+        suite_name: str | None = None,
+        model: str | None = None,
+        on_log: Callable[[DetectionLog], None] | None = None,
+    ) -> None:
         self.shield = shield
         self.mask_output = mask_output
+        self.run_id = run_id
+        self.suite_name = suite_name
+        self.model = model
+        self.on_log = on_log
         self._detection_log: list[DetectionLog] = []
+        # Per-task context (set/cleared by the benchmark harness via set_task_context)
+        self._task_context: dict[str, str | None] = {
+            "task_id": None,
+            "user_task_id": None,
+            "injection_task_id": None,
+        }
+
+    def set_task_context(
+        self,
+        task_id: str | None = None,
+        user_task_id: str | None = None,
+        injection_task_id: str | None = None,
+    ) -> None:
+        """Update task context for subsequent detection logs."""
+        if task_id is not None:
+            self._task_context["task_id"] = task_id
+        if user_task_id is not None:
+            self._task_context["user_task_id"] = user_task_id
+        if injection_task_id is not None:
+            self._task_context["injection_task_id"] = injection_task_id
+
+    def reset_task_context(self) -> None:
+        self._task_context = {
+            "task_id": None,
+            "user_task_id": None,
+            "injection_task_id": None,
+        }
 
     # ---- public API ----
 
@@ -137,34 +183,54 @@ class IntentShieldElement(BasePipelineElement):
         tool_name = _get_call_attr(tool_call, "function") or "unknown"
         raw_args = _get_call_attr(tool_call, "args")
         tool_args: dict[str, Any] = dict(raw_args) if raw_args else {}
-        tool_content = self._get_text_content(last.get("content", []))
+        tool_content = self._get_text_content(last.get("content", ""))
+        # Re-pack the message content as a single text block so downstream
+        # agentdojo code (which iterates `for el in message["content"]`) keeps
+        # working. Keep local `tool_content` as a plain string for the judge
+        # and DetectionLog.
+        if isinstance(last.get("content"), list):
+            last["content"] = [text_content_block_from_string(tool_content)]
 
-        decision, judge_error = self._judge_output_alignment(
+        decision, judge_error, judge_latency_ms = self._judge_output_alignment(
             user_instruction, tool_name, tool_args, tool_content
         )
 
-        masked = False
+        outcome = "none"
         if decision.action == RiskLevel.DANGEROUS:
-            masked = self._apply_mask(last, decision.risk_score, "dangerous")
+            self._apply_mask(last, decision.risk_score, "dangerous")
+            outcome = "masked"
         elif decision.action == RiskLevel.SUSPICIOUS and self.mask_output:
-            masked = self._apply_mask(last, decision.risk_score, "suspicious")
+            self._apply_mask(last, decision.risk_score, "suspicious")
+            outcome = "masked"
         elif decision.action == RiskLevel.SUSPICIOUS and not self.mask_output:
             self._apply_sanitize(last)
+            outcome = "sanitized"
 
-        self._detection_log.append(
-            DetectionLog(
-                timestamp=_now_iso(),
-                tool_name=tool_name,
-                tool_args=tool_args,
-                user_instruction_preview=user_instruction[:200],
-                output_preview=tool_content[:200],
-                risk_score=decision.risk_score,
-                thought=decision.thought,
-                action=decision.action,
-                masked=masked,
-                error=judge_error,
-            )
+        log = DetectionLog(
+            timestamp=_now_iso(),
+            run_id=self.run_id,
+            suite_name=self.suite_name,
+            task_id=self._task_context.get("task_id"),
+            user_task_id=self._task_context.get("user_task_id"),
+            injection_task_id=self._task_context.get("injection_task_id"),
+            model=self.model,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            user_instruction_preview=user_instruction[:200],
+            output_preview=tool_content[:200],
+            risk_score=decision.risk_score,
+            thought=decision.thought,
+            action=decision.action,
+            outcome=outcome,
+            error=judge_error,
+            judge_latency_ms=judge_latency_ms,
         )
+        self._detection_log.append(log)
+        if self.on_log is not None:
+            try:
+                self.on_log(log)
+            except Exception as cb_err:  # don't let logging break the pipeline
+                print(f"[IntentShield] on_log callback error: {cb_err}", file=__import__("sys").stderr)
         return query, runtime, env, messages, extra_args
 
     def get_detection_log(self) -> list[DetectionLog]:
@@ -181,46 +247,46 @@ class IntentShieldElement(BasePipelineElement):
         tool_name: str,
         tool_args: dict[str, Any],
         tool_content: str,
-    ) -> tuple[ShieldDecision, str | None]:
-        """Call shield.judge(); return (decision, error_str|None)."""
+    ) -> tuple[ShieldDecision, str | None, float | None]:
+        """Call shield.judge(); return (decision, error_str|None, latency_ms)."""
+        import time
+
         if not tool_content:
-            return _safe_decision(tool_name, user_instruction), None
+            return _safe_decision(tool_name, user_instruction), None, 0.0
+        start = time.perf_counter()
         try:
             decision = self.shield.judge(
                 user_instruction=user_instruction,
-                tool_name="follow_external_instruction",
-                tool_params={
-                    "external_content": tool_content[:1000],
-                    "original_tool": tool_name,
-                    "original_tool_args": tool_args,
-                },
+                tool_name=tool_name,
+                tool_params=tool_args,
             )
-            return decision, None
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            return decision, None, latency_ms
         except Exception as e:
+            latency_ms = (time.perf_counter() - start) * 1000.0
             error_str = f"{type(e).__name__}: {e}"
             decision = ShieldDecision(
                 action=RiskLevel.DANGEROUS,
                 risk_score=1.0,
                 thought=f"Judge error: {error_str}",
                 tool_name=tool_name,
-                tool_params={},
+                tool_params=tool_args,
                 user_instruction=user_instruction,
             )
-            return decision, error_str
+            return decision, error_str, latency_ms
 
     def _apply_mask(
         self, tool_message: ChatMessage, risk_score: float, reason: str
-    ) -> bool:
+    ) -> None:
         tool_message["content"] = [
             text_content_block_from_string(
                 f"[IntentShield: Output masked due to {reason} content (risk={risk_score:.2f})]"
             )
         ]
         tool_message["error"] = f"IntentShield: {reason} content detected"
-        return True
 
     def _apply_sanitize(self, tool_message: ChatMessage) -> None:
-        original = self._get_text_content(tool_message.get("content", []))
+        original = self._get_text_content(tool_message.get("content", ""))
         result = original
         for pattern in self._SANITIZE_PATTERNS:
             result = re.sub(pattern, "[filtered]", result, flags=re.IGNORECASE)

@@ -217,6 +217,7 @@ def run_agentdojo(shield: IntentShield, args):
             break
 
     # Set environment variables for OpenAI-compatible models (qwen, deepseek, etc.)
+    # CLI flags take precedence over .env values loaded at module init
     if args.model_base_url:
         os.environ["OPENAI_COMPATIBLE_BASE_URL"] = args.model_base_url
     if args.model_api_key:

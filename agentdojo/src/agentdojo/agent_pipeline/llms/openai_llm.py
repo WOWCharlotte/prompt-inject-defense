@@ -13,6 +13,7 @@ from openai.types.chat import (
     ChatCompletionMessageToolCall,
     ChatCompletionMessageToolCallParam,
     ChatCompletionReasoningEffort,
+    ChatCompletionSystemMessageParam,
     ChatCompletionToolMessageParam,
     ChatCompletionToolParam,
     ChatCompletionUserMessageParam,
@@ -75,8 +76,17 @@ def _content_blocks_to_openai_content_blocks(
 
 
 def _message_to_openai(message: ChatMessage, model_name: str) -> ChatCompletionMessageParam:
+    # OpenAI-compatible models (qwen, deepseek, glm, etc.) don't support the
+    # "developer" role — fall back to "system" for system messages.
+    _OPENAI_COMPAT_PATTERN = ("qwen", "deepseek", "glm", "zhipu", "mistral")
+    _use_system = any(p in model_name.lower() for p in _OPENAI_COMPAT_PATTERN)
+
     match message["role"]:
         case "system":
+            if _use_system:
+                return ChatCompletionUserMessageParam(
+                    role="user", content=_content_blocks_to_openai_content_blocks(message)
+                )
             return ChatCompletionDeveloperMessageParam(
                 role="developer", content=_content_blocks_to_openai_content_blocks(message)
             )

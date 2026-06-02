@@ -20,6 +20,12 @@ from intent_shield.types import RiskLevel, ShieldDecision
 def test_detection_log_serializes_to_json():
     log = DetectionLog(
         timestamp="2026-06-02T10:00:00+00:00",
+        run_id="run-001",
+        suite_name="workspace",
+        task_id="user_task_0",
+        user_task_id="user_task_0",
+        injection_task_id=None,
+        model="qwen-plus",
         tool_name="get_email",
         tool_args={"folder": "inbox"},
         user_instruction_preview="summarize my emails",
@@ -27,14 +33,19 @@ def test_detection_log_serializes_to_json():
         risk_score=0.9,
         thought="Injection detected",
         action=RiskLevel.DANGEROUS,
-        masked=True,
+        outcome="masked",
         error=None,
+        judge_latency_ms=42.5,
     )
     payload = json.loads(log.model_dump_json())
     assert payload["tool_name"] == "get_email"
     assert payload["tool_args"] == {"folder": "inbox"}
     assert payload["action"] == "dangerous"
-    assert payload["masked"] is True
+    assert payload["outcome"] == "masked"
+    assert payload["run_id"] == "run-001"
+    assert payload["suite_name"] == "workspace"
+    assert payload["model"] == "qwen-plus"
+    assert payload["judge_latency_ms"] == 42.5
     assert payload["error"] is None
 
 
@@ -48,7 +59,7 @@ def test_detection_log_error_field_optional():
         risk_score=1.0,
         thought="boom",
         action=RiskLevel.DANGEROUS,
-        masked=True,
+        outcome="masked",
         error="TimeoutError",
     )
     assert log.error == "TimeoutError"
@@ -124,7 +135,7 @@ def test_safe_passes_through():
     logs = element.get_detection_log()
     assert len(logs) == 1
     assert logs[0].action == RiskLevel.SAFE
-    assert logs[0].masked is False
+    assert logs[0].outcome == "none"
 
 
 def test_dangerous_always_masks_even_when_mask_output_false():
@@ -138,7 +149,7 @@ def test_dangerous_always_masks_even_when_mask_output_false():
     assert "dangerous" in text
     assert msgs[-1].get("error") and "IntentShield" in msgs[-1]["error"]
     logs = element.get_detection_log()
-    assert logs[0].masked is True
+    assert logs[0].outcome == "masked"
     assert logs[0].action == RiskLevel.DANGEROUS
 
 
@@ -178,7 +189,7 @@ def test_judge_error_triggers_default_deny():
     assert "dangerous" in text
     logs = element.get_detection_log()
     assert logs[0].action == RiskLevel.DANGEROUS
-    assert logs[0].masked is True
+    assert logs[0].outcome == "masked"
     assert logs[0].error is not None and "RuntimeError" in logs[0].error
     assert "LLM down" in logs[0].thought
 

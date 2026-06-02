@@ -66,6 +66,9 @@ def build_intent_shield_pipeline(
     shield: Any,
     model: str | ModelsEnum,
     mask_output: bool = True,
+    run_id: str | None = None,
+    suite_name: str | None = None,
+    on_log: "Callable[[Any], None] | None" = None,
 ) -> Any:
     """Build an AgentPipeline with IntentShieldElement inserted.
 
@@ -81,8 +84,14 @@ def build_intent_shield_pipeline(
 
     The element is placed AFTER `ToolsExecutor` so that the tool message is
     already in `messages` when the element runs.
+
+    `run_id` and `suite_name` are stamped onto every DetectionLog so logs can
+    be correlated back to the run. `on_log`, if provided, is invoked for every
+    DetectionLog (use it for streaming — file writes with flush, console print,
+    etc.).
     """
     import importlib.resources
+    from collections.abc import Callable
 
     import openai
     import yaml
@@ -109,7 +118,14 @@ def build_intent_shield_pipeline(
         system_messages = yaml.safe_load(f)
     system_message = system_messages.get("default", "")
 
-    intent_element = IntentShieldElement(shield=shield, mask_output=mask_output)
+    intent_element = IntentShieldElement(
+        shield=shield,
+        mask_output=mask_output,
+        run_id=run_id,
+        suite_name=suite_name,
+        model=model_str,
+        on_log=on_log,
+    )
     tools_loop = ToolsExecutionLoop([
         ToolsExecutor(tool_output_formatter=tool_result_to_str),
         intent_element,
@@ -154,12 +170,31 @@ class AgentDojoRunner:
         shield: Any,
         log_dir: str | Path = "./results",
         mask_output: bool = True,
+        on_suspicious: str = "block",
     ) -> None:
         self.shield = shield
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.mask_output = mask_output
+        self.on_suspicious = on_suspicious
         self._run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        self._log_fh = None  # type: ignore[assignment]
+        self._log_path: Path | None = None
+
+    def __del__(self) -> None:
+        # Best-effort close so the streaming NDJSON file handle is released
+        # when the runner is garbage-collected.
+        fh = getattr(self, "_log_fh", None)
+        if fh is not None and not fh.closed:
+            try:
+                fh.close()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        """Close the streaming NDJSON file handle (if open). Idempotent."""
+        if self._log_fh is not None and not self._log_fh.closed:
+            self._log_fh.close()
 
     def _collect_shield_data(
         self, pipeline: Any
@@ -168,7 +203,7 @@ class AgentDojoRunner:
 
         Returns:
             (blocked_count, logs) where `blocked_count` is the number of
-            logs whose `masked` field is True.
+            logs whose `outcome == "masked"`.
         """
         from agentdojo.agent_pipeline.tool_execution import ToolsExecutionLoop
 
@@ -180,7 +215,9 @@ class AgentDojoRunner:
                     if _is_intent_shield_element(inner):
                         logs = inner.get_detection_log()
                         all_logs.extend(logs)
-                        blocked += sum(1 for log in logs if log.masked)
+                        blocked += sum(
+                            1 for log in logs if getattr(log, "outcome", None) == "masked"
+                        )
         return blocked, all_logs
 
     def run(
@@ -194,18 +231,60 @@ class AgentDojoRunner:
         force_rerun: bool = False,
         max_user_tasks: int | None = None,
         max_injection_tasks: int | None = None,
+        quiet: bool = False,
     ) -> dict[str, Any]:
         """Run the AgentDojo benchmark with IntentShield integrated.
+
+        DetectionLogs are streamed to NDJSON and (unless `quiet=True`) printed
+        to stderr as they happen, so progress is visible during long runs.
 
         Returns a dict with utility_avg, security_avg, blocked_tool_calls,
         total_judge_calls, run_id, plus task / attack / config metadata.
         """
         import random
+        import sys
+
+        # Open the NDJSON file once and keep it open for the lifetime of the
+        # runner. Stale files with the same run_id are truncated to avoid
+        # mixing runs.
+        if self._log_fh is None or self._log_fh.closed:
+            judge_logs_path = self.log_dir / f"judge_logs_{self._run_id}.ndjson"
+            if judge_logs_path.exists():
+                judge_logs_path.unlink()
+            self._log_fh = open(
+                judge_logs_path, "a", encoding="utf-8", buffering=1
+            )  # line-buffered
+            self._log_path = judge_logs_path
+
+        log_fh = self._log_fh
+
+        def _on_log(log: Any) -> None:
+            payload = log.model_dump_json()
+            log_fh.write(payload + "\n")
+            # line-buffered (buffering=1) flushes on newline, but be explicit
+            # so the user can `tail -f` the file from another terminal.
+            log_fh.flush()
+            if not quiet:
+                ts = log.timestamp.split("T", 1)[-1][:8]  # HH:MM:SS
+                task = log.user_task_id or log.task_id or "-"
+                inj = log.injection_task_id or "-"
+                tag = "inj" if inj != "-" else "usr"
+                print(
+                    f"[IntentShield] {ts} | {tag}:{task} | "
+                    f"action={log.action:<10} | tool={log.tool_name} | "
+                    f"risk={log.risk_score:.2f} | outcome={log.outcome} | "
+                    f"latency={log.judge_latency_ms:.0f}ms",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         pipeline = build_intent_shield_pipeline(
             shield=self.shield,
             model=model if isinstance(model, str) else model.value,
             mask_output=self.mask_output,
+            run_id=self._run_id,
+            suite_name=suite_name,
+            on_log=_on_log,
         )
         suite = get_suite(benchmark_version, suite_name)
 
@@ -265,26 +344,15 @@ class AgentDojoRunner:
                 results.get("injection_tasks_utility_results", {})
             ),
         }
-
-        self._save_outputs(metrics, judge_logs, suite_name)
+        self._save_outputs(metrics, suite_name)
         return metrics
 
     def _save_outputs(
         self,
         metrics: dict[str, Any],
-        judge_logs: list[Any],
         suite_name: str,
     ) -> None:
-        """Write NDJSON judge logs and metrics JSON. Failures are warnings, not errors."""
-        if judge_logs:
-            judge_logs_path = self.log_dir / f"judge_logs_{self._run_id}.ndjson"
-            try:
-                with open(judge_logs_path, "w", encoding="utf-8") as f:
-                    for log in judge_logs:
-                        f.write(log.model_dump_json() + "\n")
-            except OSError as e:
-                print(f"Warning: failed to save judge logs to {judge_logs_path}: {e}")
-
+        """Write metrics JSON. NDJSON judge logs are streamed during `run()`."""
         metrics_path = self.log_dir / f"metrics_{suite_name}_{self._run_id}.json"
         try:
             with open(metrics_path, "w", encoding="utf-8") as f:

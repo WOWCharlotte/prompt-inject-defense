@@ -56,6 +56,14 @@ class ModelsEnum(StrEnum):
     """Local model"""
     VLLM_PARSED = "vllm_parsed"
     """VLLM parsed model"""
+    QWEN_MAX = "qwen-max"
+    """Qwen Max"""
+    QWEN_PLUS = "qwen-plus"
+    """Qwen Plus"""
+    DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+    """DeepSeek V4 Flash"""
+    DEEPSEEK_V4_PRO = "deepseek-v4-pro"
+    """DeepSeek V4 Pro"""
 
 
 MODEL_PROVIDERS = {
@@ -85,6 +93,10 @@ MODEL_PROVIDERS = {
     ModelsEnum.GEMINI_2_5_PRO_PREVIEW_05_06: "google",
     ModelsEnum.LOCAL: "local",
     ModelsEnum.VLLM_PARSED: "vllm_parsed",
+    ModelsEnum.QWEN_MAX: "openai-compatible",
+    ModelsEnum.QWEN_PLUS: "openai-compatible",
+    ModelsEnum.DEEPSEEK_V4_FLASH: "openai-compatible",
+    ModelsEnum.DEEPSEEK_V4_PRO: "openai-compatible",
 }
 
 
@@ -115,4 +127,16 @@ MODEL_NAMES = {
     "gemini-2.5-pro-preview-05-06": "AI model developed by Google",
     "local": "Local model",
     "vllm_parsed": "Local model",
+    "qwen-plus": "AI assistant",
+    "qwen-max": "AI assistant",
+    "qwen-turbo": "AI assistant",
+    "qwen-long": "AI assistant",
+    "deepseek-chat": "AI assistant",
+    "deepseek-plus": "AI assistant",
+    "deepseek-coder": "AI assistant",
+    "glm-4": "AI assistant",
+    "glm-4-plus": "AI assistant",
+    "glm-4-flash": "AI assistant",
+    "zhipu": "AI assistant",
+    "mistral": "AI assistant",
 }

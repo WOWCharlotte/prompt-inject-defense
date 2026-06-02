@@ -108,7 +108,7 @@ def _make_intent_element_with_logs(n: int) -> IntentShieldElement:
             risk_score=0.5,
             thought="t",
             action=RiskLevel.SUSPICIOUS,
-            masked=(i % 2 == 0),
+            outcome="masked" if (i % 2 == 0) else "none",
             error=None,
         ))
     return el
@@ -166,10 +166,16 @@ def test_run_without_attack_writes_metrics_and_logs(tmp_path):
         "security_results": {"inj_0": True},
     }
 
-    with patch("adapters.agentdojo.runner.build_intent_shield_pipeline", return_value=pipeline), \
+    captured_callback = {}
+
+    def _capture_pipeline(**kwargs):
+        captured_callback["on_log"] = kwargs.get("on_log")
+        return pipeline
+
+    with patch("adapters.agentdojo.runner.build_intent_shield_pipeline", side_effect=_capture_pipeline), \
          patch("adapters.agentdojo.runner.get_suite", return_value=MagicMock(user_tasks={}, injection_tasks={})), \
          patch("adapters.agentdojo.runner.benchmark_suite_without_injections", return_value=fake_results):
-        metrics = runner.run("workspace", "gpt-4o-mini")
+        metrics = runner.run("workspace", "gpt-4o-mini", quiet=True)
 
     assert metrics["suite_name"] == "workspace"
     assert metrics["model"] == "gpt-4o-mini"
@@ -181,14 +187,57 @@ def test_run_without_attack_writes_metrics_and_logs(tmp_path):
     assert metrics["num_user_tasks"] == 2
     assert metrics["num_injection_tasks"] == 0
 
-    # Verify files written
+    # Metrics file is written; NDJSON is streamed — verify file was created
+    # (streaming is exercised by the test_run_streams_logs_to_ndjson test below).
     judge_log_files = list(tmp_path.glob("judge_logs_*.ndjson"))
     metrics_files = list(tmp_path.glob("metrics_workspace_*.json"))
     assert len(judge_log_files) == 1
     assert len(metrics_files) == 1
-    # NDJSON should have 3 lines
-    lines = judge_log_files[0].read_text(encoding="utf-8").strip().splitlines()
+
+
+def test_run_streams_logs_to_ndjson(tmp_path):
+    """When the callback fires, the log is appended to the NDJSON file
+    in real time (line-buffered + flush)."""
+    shield = MagicMock()
+    runner = AgentDojoRunner(shield=shield, log_dir=str(tmp_path), mask_output=True)
+    intent_el = _make_intent_element_with_logs(3)
+    loop = ToolsExecutionLoop([ToolsExecutor(), intent_el, MagicMock()])
+    pipeline = AgentPipeline([loop])
+
+    captured = {}
+
+    def _capture_pipeline(**kwargs):
+        captured["on_log"] = kwargs.get("on_log")
+        return pipeline
+
+    fake_results = {"utility_results": {}, "security_results": {}}
+
+    with patch("adapters.agentdojo.runner.build_intent_shield_pipeline", side_effect=_capture_pipeline), \
+         patch("adapters.agentdojo.runner.get_suite", return_value=MagicMock(user_tasks={}, injection_tasks={})), \
+         patch("adapters.agentdojo.runner.benchmark_suite_without_injections", return_value=fake_results):
+        runner.run("workspace", "gpt-4o-mini", quiet=True)
+
+    on_log = captured.get("on_log")
+    assert on_log is not None, "build_intent_shield_pipeline should receive an on_log callback"
+
+    # File was created and is empty (no logs yet)
+    log_files = list(tmp_path.glob("judge_logs_*.ndjson"))
+    assert len(log_files) == 1
+    assert log_files[0].read_text(encoding="utf-8") == ""
+
+    # Fire the callback for each pre-seeded log and verify streaming write
+    for log in intent_el.get_detection_log():
+        on_log(log)
+
+    lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 3
+    # Each line is valid JSON
+    import json as _json
+    for line in lines:
+        payload = _json.loads(line)
+        assert "tool_name" in payload
+        assert "action" in payload
+        assert "outcome" in payload
 
 
 def test_run_with_attack_loads_attacker(tmp_path):
@@ -211,7 +260,7 @@ def test_run_with_attack_loads_attacker(tmp_path):
          patch("adapters.agentdojo.runner.get_suite", return_value=fake_suite), \
          patch("adapters.agentdojo.runner.load_attack", return_value=fake_attacker) as mock_load, \
          patch("adapters.agentdojo.runner.benchmark_suite_with_injections", return_value=fake_results):
-        metrics = runner.run("workspace", "gpt-4o-mini", attack="tool_knowledge")
+        metrics = runner.run("workspace", "gpt-4o-mini", attack="tool_knowledge", quiet=True)
 
     mock_load.assert_called_once_with("tool_knowledge", fake_suite, pipeline)
     assert metrics["attack"] == "tool_knowledge"
