@@ -7,6 +7,7 @@ Usage:
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Add project root to path
@@ -32,6 +33,9 @@ def main():
     parser.add_argument("--max-cases", type=int, default=None, help="Limit number of cases")
     parser.add_argument("--no-rag", action="store_true", help="Disable RAG")
     parser.add_argument("--output", default=None, help="Output JSON file for results")
+
+    default_output = PROJECT_ROOT / "results" / f"user_cases_{datetime.now().strftime('%Y:%m:%d_%H%M%S')}.json"
+    parser.set_defaults(output=str(default_output))
     args = parser.parse_args()
 
     # Load test cases
@@ -64,11 +68,12 @@ def main():
         tool_params = eval(case["Tool Parameters"])  # noqa: PGH001
 
         try:
-            decision = shield.judge(
+            trace = shield.judge_with_trace(
                 user_instruction=user_instruction,
                 tool_name=tool_name,
                 tool_params=tool_params,
             )
+            decision = trace.decision
             action = decision.action.value
             risk_score = decision.risk_score
 
@@ -86,6 +91,8 @@ def main():
                 "action": action,
                 "risk_score": risk_score,
                 "thought": decision.thought,
+                "llm_input": trace.prompt_messages,
+                "llm_output": trace.raw_response,
             })
 
             print(f"[{i + 1}/{len(cases)}] {action:12s} (score={risk_score:.2f}) - {user_instruction[:60]}...")
@@ -96,6 +103,8 @@ def main():
                 "case_id": i,
                 "tool": tool_name,
                 "error": str(e),
+                "llm_input": None,
+                "llm_output": None,
             })
             print(f"[{i + 1}/{len(cases)}] ERROR: {e}")
 
