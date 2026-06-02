@@ -61,6 +61,16 @@ def _safe_decision(tool_name: str, user_instruction: str) -> ShieldDecision:
     )
 
 
+def _get_call_attr(tool_call: Any, attr: str) -> Any:
+    """Safely read an attribute from a tool_call object or dict."""
+    if tool_call is None:
+        return None
+    val = getattr(tool_call, attr, None)
+    if val is None and isinstance(tool_call, dict):
+        val = tool_call.get(attr)
+    return val
+
+
 # ---------------------------------------------------------------------------
 # IntentShieldElement
 # ---------------------------------------------------------------------------
@@ -102,6 +112,14 @@ class IntentShieldElement(BasePipelineElement):
         messages: Sequence[ChatMessage] = (),
         extra_args: dict[str, Any] = {},
     ) -> tuple[str, FunctionsRuntime, Env, Sequence[ChatMessage], dict[str, Any]]:
+        """Inspect the latest tool message and judge against the user instruction.
+
+        `query` is the original user task string propagated through the pipeline —
+        it is used directly as the user instruction (no message scanning needed).
+
+        Tool name and args are read from the tool message's `tool_call` field,
+        which agentdojo populates from the preceding assistant tool_call response.
+        """
         if not messages:
             return query, runtime, env, messages, extra_args
 
@@ -109,15 +127,17 @@ class IntentShieldElement(BasePipelineElement):
         if last.get("role") != "tool":
             return query, runtime, env, messages, extra_args
 
-        user_instruction = self._extract_user_instruction(messages)
+        # query IS the user instruction — no need to scan messages
+        user_instruction = query
         if not user_instruction:
             return query, runtime, env, messages, extra_args
 
+        # tool_call carries function name + args directly on the tool message
         tool_call = last.get("tool_call")
-        tool_name = tool_call.function if tool_call else "unknown"
+        tool_name = _get_call_attr(tool_call, "function") or "unknown"
+        raw_args = _get_call_attr(tool_call, "args")
+        tool_args: dict[str, Any] = dict(raw_args) if raw_args else {}
         tool_content = self._get_text_content(last.get("content", []))
-        tool_call_id = last.get("tool_call_id")
-        tool_args = self._extract_tool_args(messages, tool_call_id)
 
         decision, judge_error = self._judge_output_alignment(
             user_instruction, tool_name, tool_args, tool_content
@@ -217,48 +237,3 @@ class IntentShieldElement(BasePipelineElement):
                     parts.append(block.get("content", ""))
             return "\n".join(parts)
         return str(content)
-
-    def _extract_user_instruction(self, messages: Sequence[ChatMessage]) -> str:
-        for msg in messages:
-            if msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, list):
-                    blocks = [
-                        c.get("content", "")
-                        for c in content
-                        if isinstance(c, dict) and c.get("type") == "text"
-                    ]
-                    return "\n".join(blocks)
-                if isinstance(content, str):
-                    return content
-        return ""
-
-    def _extract_tool_args(
-        self, messages: Sequence[ChatMessage], tool_call_id: str | None
-    ) -> dict[str, Any]:
-        """Bottom-up search for the most recent assistant message and match args.
-
-        - Stops at the first assistant message (going from bottom up). If that
-          assistant has a `tool_call` with matching `id`, returns its `args`.
-        - Stops at the first non-assistant, non-tool message (treat as boundary).
-        - Returns `{}` on any miss.
-        """
-        if not tool_call_id:
-            return {}
-        for msg in reversed(messages):
-            role = msg.get("role")
-            if role == "assistant":
-                tool_calls = msg.get("tool_calls") or []
-                for tc in tool_calls:
-                    tc_id = getattr(tc, "id", None) or (
-                        tc.get("id") if isinstance(tc, dict) else None
-                    )
-                    if tc_id == tool_call_id:
-                        args = getattr(tc, "args", None) or (
-                            tc.get("args") if isinstance(tc, dict) else None
-                        )
-                        return dict(args) if args else {}
-                return {}
-            if role != "tool":
-                return {}
-        return {}
