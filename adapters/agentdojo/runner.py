@@ -1,3 +1,4 @@
+"""AgentDojo benchmark runner with IntentShield integration."""
 from __future__ import annotations
 
 import json
@@ -6,203 +7,181 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agentdojo.agent_pipeline import AgentPipeline, BasePipelineElement
-from agentdojo.agent_pipeline.agent_pipeline import (
-    AgentPipeline,
-    InitQuery,
-    SystemMessage,
-    ToolsExecutionLoop,
-)
-from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLM, OpenAILLMToolFilter
-from agentdojo.agent_pipeline.tool_execution import ToolsExecutor, tool_result_to_str
 from agentdojo.attacks.attack_registry import load_attack
 from agentdojo.benchmark import (
     benchmark_suite_with_injections,
     benchmark_suite_without_injections,
 )
-from agentdojo.logging import OutputLogger
 from agentdojo.models import MODEL_PROVIDERS, ModelsEnum
 from agentdojo.task_suite.load_suites import get_suite
-from rich.live import Live
 
-from intent_shield import IntentShield
-
-from .pipeline import IntentShieldElement
+from adapters.agentdojo.pipeline import IntentShieldElement
 
 
-# Tool filter prompt from agentdojo
-TOOL_FILTER_PROMPT = (
-    "Your task is to filter the list of tools to only include those that are relevant to the user's task."
-    "Output the comma-separated list containing the names of the necessary tools."
-    "Do not write tool names that do not exist."
-)
+# OpenAI-compatible model name patterns → forced to openai-compatible provider.
+_OPENAI_COMPAT_PATTERNS = ("qwen", "deepseek", "glm", "zhipu", "mistral")
 
 
 def get_llm_provider(model: str | ModelsEnum) -> tuple[str, str]:
-    """Get provider and model name from model identifier.
+    """Identify the provider and canonical model name for a model identifier.
 
-    Handles both short names (e.g., "gpt-4o-mini") and full names
-    (e.g., "gpt-4o-mini-2024-07-18") by matching against MODEL_PROVIDERS.
-
-    Also handles OpenAI-compatible models (qwen, deepseek, etc.) by detecting
-    patterns and returning "openai-compatible" as provider with base_url info.
+    Resolution order:
+        1. Exact `ModelsEnum` value match → (provider, full_name)
+        2. Substring / dash-stripped match against `ModelsEnum`
+        3. Heuristic: contains "qwen"/"deepseek"/"glm"/"zhipu"/"mistral"
+           → ("openai-compatible", original string)
+        4. Heuristic: contains "gpt" → ("openai", original string)
+        5. Heuristic: contains "claude" → ("anthropic", original string)
+        6. Fallback: ("openai", original string)
     """
-    if isinstance(model, ModelsEnum):
-        model_str = model.value
-    else:
-        model_str = model
+    model_str = model.value if isinstance(model, ModelsEnum) else model
 
-    # Try to match as ModelsEnum value (exact match first)
+    # 1. exact enum match
     for enum_val in ModelsEnum:
         if enum_val.value == model_str:
             return MODEL_PROVIDERS[enum_val], enum_val.value
 
-    # Try substring match for short names
+    # 2. fuzzy match (substring or dash-stripped prefix)
+    needle = model_str.replace("-", "")
     for enum_val in ModelsEnum:
-        if model_str in enum_val.value or enum_val.value.replace("-", "").startswith(model_str.replace("-", "")):
-            return MODEL_PROVIDERS[enum_val], enum_val.value
+        full = enum_val.value
+        if model_str in full or full.replace("-", "").startswith(needle):
+            return MODEL_PROVIDERS[enum_val], full
 
-    # Detect OpenAI-compatible models
-    model_lower = model_str.lower()
-    if "qwen" in model_lower:
-        return "openai-compatible", model_str
-    if "deepseek" in model_lower:
-        return "openai-compatible", model_str
-    if "glm" in model_lower or "zhipu" in model_lower:
-        return "openai-compatible", model_str
-    if "mistral" in model_lower:
-        return "openai-compatible", model_str
-    if "llama" in model_lower and "anthropic" not in model_lower:
-        return "openai-compatible", model_str
-
-    # Fallback: assume openai for model names containing common patterns
-    if "gpt" in model_lower:
+    # 3-5. heuristic
+    lower = model_str.lower()
+    for pattern in _OPENAI_COMPAT_PATTERNS:
+        if pattern in lower:
+            return "openai-compatible", model_str
+    if "gpt" in lower:
         return "openai", model_str
-    if "claude" in model_lower:
+    if "claude" in lower:
         return "anthropic", model_str
 
+    # 6. fallback
     return "openai", model_str
 
 
 def build_intent_shield_pipeline(
-    shield: IntentShield,
+    shield: Any,
     model: str | ModelsEnum,
-    on_suspicious: str = "block",
-) -> AgentPipeline:
-    """Build AgentPipeline with IntentShieldElement inserted.
+    mask_output: bool = True,
+) -> Any:
+    """Build an AgentPipeline with IntentShieldElement inserted.
+
+    All models are routed through `OpenAILLM` + `openai.OpenAI()`. OpenAI-
+    compatible providers (qwen, deepseek, glm, zhipu, mistral) are reached
+    via the `OPENAI_COMPATIBLE_BASE_URL` and `OPENAI_COMPATIBLE_API_KEY`
+    environment variables.
 
     Pipeline structure:
-        [SystemMessage] → [InitQuery] → [LLM] → [ToolsExecutionLoop]
-                                                       ↑
-                                            [IntentShieldElement, ToolsExecutor, LLM]
+        [SystemMessage] → [InitQuery] → [LLM] → [ToolsExecutionLoop(
+            [ToolsExecutor, IntentShieldElement, LLM]
+        )]
+
+    The element is placed AFTER `ToolsExecutor` so that the tool message is
+    already in `messages` when the element runs.
     """
-    provider, model_str = get_llm_provider(model)
-
-    # Create LLM element based on provider
-    import anthropic
-    import cohere
-    import google.genai
-    import openai
-
-    if provider == "openai":
-        client = openai.OpenAI()
-        llm = OpenAILLM(client, model_str)
-    elif provider == "anthropic":
-        client = anthropic.Anthropic()
-        llm = AnthropicLLM(client, model_str)
-    elif provider == "cohere":
-        client = cohere.Client()
-        from agentdojo.agent_pipeline.llms.cohere_llm import CohereLLM
-        llm = CohereLLM(client, model_str)
-    elif provider == "google":
-        client = google.genai.Client(
-            vertexai=True,
-            project=None,  # Will use env var
-            location=None,
-        )
-        from agentdojo.agent_pipeline.llms.google_llm import GoogleLLM
-        llm = GoogleLLM(model_str, client)
-    elif provider == "openai-compatible":
-        # Support for qwen, deepseek, glm, mistral, etc. via OpenAI-compatible API
-        base_url = os.getenv("OPENAI_COMPATIBLE_BASE_URL", "https://api.openai.com/v1")
-        api_key = os.getenv("OPENAI_COMPATIBLE_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-        client = openai.OpenAI(base_url=base_url, api_key=api_key)
-        llm = OpenAILLM(client, model_str)
-    else:
-        # Default to openai
-        client = openai.OpenAI()
-        llm = OpenAILLM(client, model_str)
-
-    # Load default system message
     import importlib.resources
+
+    import openai
     import yaml
+    from agentdojo.agent_pipeline import AgentPipeline
+    from agentdojo.agent_pipeline.agent_pipeline import InitQuery, SystemMessage
+    from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLM
+    from agentdojo.agent_pipeline.tool_execution import (
+        ToolsExecutionLoop,
+        ToolsExecutor,
+        tool_result_to_str,
+    )
+
+    _provider, model_str = get_llm_provider(model)
+
+    base_url = os.getenv("OPENAI_COMPATIBLE_BASE_URL", "https://api.openai.com/v1")
+    api_key = os.getenv("OPENAI_COMPATIBLE_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    client = openai.OpenAI(base_url=base_url, api_key=api_key)
+    llm = OpenAILLM(client, model_str)
+
+    # Load default system message from agentdojo package data
     package_files = importlib.resources.files("agentdojo")
     path = package_files / "data" / "system_messages.yaml"
-    with importlib.resources.as_file(path) as p, p.open() as f:
+    with importlib.resources.as_file(path) as p, open(p) as f:
         system_messages = yaml.safe_load(f)
     system_message = system_messages.get("default", "")
 
-    # Create IntentShield element
-    intent_element = IntentShieldElement(
-        shield=shield,
-        on_suspicious=on_suspicious,
-    )
-
-    # Build tools execution loop with IntentShield
+    intent_element = IntentShieldElement(shield=shield, mask_output=mask_output)
     tools_loop = ToolsExecutionLoop([
-        intent_element,
         ToolsExecutor(tool_output_formatter=tool_result_to_str),
+        intent_element,
         llm,
     ])
 
-    # Build full pipeline
     pipeline = AgentPipeline([
         SystemMessage(system_message),
         InitQuery(),
         llm,
         tools_loop,
     ])
-    pipeline.name = model_str  # Must be a valid model name for attack registry
-
+    pipeline.name = model_str
     return pipeline
 
 
-class AnthropicLLM:
-    """Wrapper for Anthropic LLM to match agentdojo's interface."""
+def _is_intent_shield_element(obj: Any) -> bool:
+    """Duck-typed check for IntentShieldElement.
 
-    def __init__(self, client: anthropic.Anthropic, model: str):
-        self.client = client
-        self.model = model
-
-    def query(self, query, runtime, env, messages, extra_args):
-        # Use agentdojo's AnthropicLLM directly
-        from agentdojo.agent_pipeline.llms.anthropic_llm import AnthropicLLM as BaseAnthropicLLM
-        return BaseAnthropicLLM(self.client, self.model).query(query, runtime, env, messages, extra_args)
+    agentdojo's BasePipelineElement may be a Protocol (no @runtime_checkable),
+    making isinstance() raise TypeError. Fall back to duck-typing in that case.
+    """
+    try:
+        return isinstance(obj, IntentShieldElement)
+    except TypeError:
+        return hasattr(obj, "get_detection_log") and hasattr(obj, "reset_detection_log")
 
 
 class AgentDojoRunner:
     """Runs AgentDojo benchmark with IntentShield integrated.
 
-    Collects utility and security metrics, plus blocked tool call logs
-    for post-analysis and reflection.
-
     Args:
         shield: The IntentShield instance for intent alignment checking.
-        log_dir: Directory to save trace logs and metrics.
-        on_suspicious: How to handle suspicious tool calls ("block" or "log").
+        log_dir: Directory to save NDJSON judge logs and metrics JSON.
+        mask_output: Forwarded to IntentShieldElement. When True, suspicious
+            tool outputs are fully masked; when False, they are sanitized
+            in place. Dangerous outputs are always fully masked.
     """
 
     def __init__(
         self,
-        shield: IntentShield,
+        shield: Any,
         log_dir: str | Path = "./results",
-        on_suspicious: str = "block",
-    ):
+        mask_output: bool = True,
+    ) -> None:
         self.shield = shield
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.on_suspicious = on_suspicious
+        self.mask_output = mask_output
+        self._run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    def _collect_shield_data(
+        self, pipeline: Any
+    ) -> tuple[int, list[Any]]:
+        """Aggregate DetectionLogs from every IntentShieldElement in the pipeline.
+
+        Returns:
+            (blocked_count, logs) where `blocked_count` is the number of
+            logs whose `masked` field is True.
+        """
+        from agentdojo.agent_pipeline.tool_execution import ToolsExecutionLoop
+
+        blocked = 0
+        all_logs: list[Any] = []
+        for element in pipeline.elements:
+            if isinstance(element, ToolsExecutionLoop):
+                for inner in element.elements:
+                    if _is_intent_shield_element(inner):
+                        logs = inner.get_detection_log()
+                        all_logs.extend(logs)
+                        blocked += sum(1 for log in logs if log.masked)
+        return blocked, all_logs
 
     def run(
         self,
@@ -216,101 +195,56 @@ class AgentDojoRunner:
         max_user_tasks: int | None = None,
         max_injection_tasks: int | None = None,
     ) -> dict[str, Any]:
-        """Run AgentDojo benchmark with IntentShield.
+        """Run the AgentDojo benchmark with IntentShield integrated.
 
-        Args:
-            suite_name: Name of the task suite (e.g., "workspace", "banking").
-            model: Model identifier or ModelsEnum value.
-            attack: Attack type name (e.g., "important_instructions", "tool_knowledge").
-            user_tasks: Tuple of user task IDs to run.
-            injection_tasks: Tuple of injection task IDs to run.
-            benchmark_version: Benchmark version string.
-            force_rerun: Whether to re-run tasks with existing results.
-            max_user_tasks: Limit number of user tasks (random sample if needed).
-            max_injection_tasks: Limit number of injection tasks (random sample if needed).
-
-        Returns:
-            Dict containing utility_avg, security_avg, blocked_tool_calls, run_id.
+        Returns a dict with utility_avg, security_avg, blocked_tool_calls,
+        total_judge_calls, run_id, plus task / attack / config metadata.
         """
         import random
 
-        # Build pipeline with IntentShield
         pipeline = build_intent_shield_pipeline(
             shield=self.shield,
             model=model if isinstance(model, str) else model.value,
-            on_suspicious=self.on_suspicious,
+            mask_output=self.mask_output,
         )
-
-        # Load suite
         suite = get_suite(benchmark_version, suite_name)
 
-        # Apply max limits if specified (random sampling)
+        # Optional random sampling of user / injection tasks
         if max_user_tasks and not user_tasks:
-            all_user_task_ids = list(suite.user_tasks.keys())
-            if len(all_user_task_ids) > max_user_tasks:
-                user_tasks = tuple(random.sample(all_user_task_ids, max_user_tasks))
-                print(f"  Limited to {max_user_tasks} user tasks (random sample)")
-
+            all_user_ids = list(suite.user_tasks.keys())
+            if len(all_user_ids) > max_user_tasks:
+                user_tasks = tuple(random.sample(all_user_ids, max_user_tasks))
         if max_injection_tasks and not injection_tasks and attack:
-            all_injection_ids = list(suite.injection_tasks.keys())
-            if len(all_injection_ids) > max_injection_tasks:
-                injection_tasks = tuple(random.sample(all_injection_ids, max_injection_tasks))
-                print(f"  Limited to {max_injection_tasks} injection tasks (random sample)")
+            all_inj_ids = list(suite.injection_tasks.keys())
+            if len(all_inj_ids) > max_injection_tasks:
+                injection_tasks = tuple(random.sample(all_inj_ids, max_injection_tasks))
 
-        # Create log directory for traces
-        trace_dir = self.log_dir / "traces" / pipeline.name / suite_name
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        print(f"  [DEBUG] Trace directory: {trace_dir}", flush=True)
+        if attack:
+            attacker = load_attack(attack, suite, pipeline)
+            results = benchmark_suite_with_injections(
+                pipeline,
+                suite,
+                attacker,
+                user_tasks=user_tasks if user_tasks else None,
+                injection_tasks=injection_tasks if injection_tasks else None,
+                logdir=self.log_dir / "traces",
+                force_rerun=force_rerun,
+                benchmark_version=benchmark_version,
+            )
+        else:
+            results = benchmark_suite_without_injections(
+                pipeline,
+                suite,
+                user_tasks=user_tasks if user_tasks else None,
+                logdir=self.log_dir / "traces",
+                force_rerun=force_rerun,
+                benchmark_version=benchmark_version,
+            )
 
-        # Wrap benchmark with OutputLogger for trace logging
-        logger = OutputLogger(str(trace_dir))
-        with logger:
-            print("  [DEBUG] Starting benchmark...", flush=True)
-            # Run benchmark
-            if attack:
-                attacker = load_attack(attack, suite, pipeline)
-                print(f"  [DEBUG] Attack loaded: {attack}", flush=True)
-                print(f"  [DEBUG] Running benchmark_suite_with_injections...", flush=True)
-                results = benchmark_suite_with_injections(
-                    pipeline,
-                    suite,
-                    attacker,
-                    user_tasks=user_tasks if user_tasks else None,
-                    injection_tasks=injection_tasks if injection_tasks else None,
-                    logdir=trace_dir,
-                    force_rerun=force_rerun,
-                    benchmark_version=benchmark_version,
-                )
-                print(f"  [DEBUG] benchmark_suite_with_injections completed", flush=True)
-            else:
-                print(f"  [DEBUG] Running benchmark_suite_without_injections...", flush=True)
-                results = benchmark_suite_without_injections(
-                    pipeline,
-                    suite,
-                    user_tasks=user_tasks if user_tasks else None,
-                    logdir=trace_dir,
-                    force_rerun=force_rerun,
-                    benchmark_version=benchmark_version,
-                )
-                print(f"  [DEBUG] benchmark_suite_without_injections completed", flush=True)
-
-        # Collect blocked counts and judge logs from IntentShieldElement
         blocked_count, judge_logs = self._collect_shield_data(pipeline)
+        utility_avg = self._compute_avg(results.get("utility_results", {}))
+        security_avg = self._compute_avg(results.get("security_results", {}))
 
-        # Compute metrics
-        utility_avg = self._compute_avg(results["utility_results"])
-        security_avg = self._compute_avg(results["security_results"])
-
-        # Save judge logs to file for analysis
-        if judge_logs:
-            judge_logs_path = self.log_dir / f"judge_logs_{self._run_id}.json"
-            with open(judge_logs_path, "w", encoding="utf-8") as f:
-                json.dump(judge_logs, f, indent=2, ensure_ascii=False)
-            print(f"  Judge logs saved to {judge_logs_path}")
-
-        # Save metrics
-
-        # Save metrics
         metrics = {
             "run_id": self._run_id,
             "suite_name": suite_name,
@@ -321,36 +255,46 @@ class AgentDojoRunner:
             "security_avg": security_avg,
             "blocked_tool_calls": blocked_count,
             "total_judge_calls": len(judge_logs),
-            "on_suspicious": self.on_suspicious,
-            # Task details
-            "user_tasks_run": list(results["utility_results"].keys()) if results else [],
-            "injection_tasks_run": list(results.get("injection_tasks_utility_results", {}).keys()) if results else [],
-            "num_user_tasks": len(results["utility_results"]) if results else 0,
-            "num_injection_tasks": len(results.get("injection_tasks_utility_results", {})) if results else 0,
+            "mask_output": self.mask_output,
+            "user_tasks_run": list(results.get("utility_results", {}).keys()),
+            "injection_tasks_run": list(
+                results.get("injection_tasks_utility_results", {}).keys()
+            ),
+            "num_user_tasks": len(results.get("utility_results", {})),
+            "num_injection_tasks": len(
+                results.get("injection_tasks_utility_results", {})
+            ),
         }
 
-        metrics_path = self.log_dir / f"metrics_{suite_name}_{self._run_id}.json"
-        with open(metrics_path, "w", encoding="utf-8") as f:
-            json.dump(metrics, f, indent=2, ensure_ascii=False)
-
+        self._save_outputs(metrics, judge_logs, suite_name)
         return metrics
 
-    def _collect_shield_data(self, pipeline: AgentPipeline) -> tuple[int, list[dict[str, Any]]]:
-        """Traverse pipeline to collect blocked counts and all judge logs."""
-        count = 0
-        all_judge_logs = []
-        for element in pipeline.elements:
-            if isinstance(element, ToolsExecutionLoop):
-                for inner in element.elements:
-                    if isinstance(inner, IntentShieldElement):
-                        count += len(inner.get_blocked_log())
-                        all_judge_logs.extend(inner.get_judge_log())
-        return count, all_judge_logs
+    def _save_outputs(
+        self,
+        metrics: dict[str, Any],
+        judge_logs: list[Any],
+        suite_name: str,
+    ) -> None:
+        """Write NDJSON judge logs and metrics JSON. Failures are warnings, not errors."""
+        if judge_logs:
+            judge_logs_path = self.log_dir / f"judge_logs_{self._run_id}.ndjson"
+            try:
+                with open(judge_logs_path, "w", encoding="utf-8") as f:
+                    for log in judge_logs:
+                        f.write(log.model_dump_json() + "\n")
+            except OSError as e:
+                print(f"Warning: failed to save judge logs to {judge_logs_path}: {e}")
 
-    def _compute_avg(self, results: dict) -> float:
-        """Compute average from dict values (utility/security results)."""
+        metrics_path = self.log_dir / f"metrics_{suite_name}_{self._run_id}.json"
+        try:
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            print(f"Warning: failed to save metrics to {metrics_path}: {e}")
+
+    @staticmethod
+    def _compute_avg(results: dict[str, bool]) -> float:
         if not results:
             return 0.0
-        values = list(results.values())
-        # Results are bools: True=1, False=0
-        return sum(1 for v in values if v) / len(values) if values else 0.0
+        truthy = sum(1 for v in results.values() if v)
+        return truthy / len(results)
