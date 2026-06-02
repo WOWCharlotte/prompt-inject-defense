@@ -34,12 +34,12 @@ def main():
     parser.add_argument("--no-rag", action="store_true", help="Disable RAG")
     parser.add_argument("--output", default=None, help="Output JSON file for results")
 
-    default_output = PROJECT_ROOT / "results" / f"user_cases_{datetime.now().strftime('%Y:%m:%d_%H%M%S')}.json"
+    default_output = PROJECT_ROOT / "results" / f"user_cases_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
     parser.set_defaults(output=str(default_output))
     args = parser.parse_args()
 
     # Load test cases
-    data_path = PROJECT_ROOT / "InjecAgent" / "data" / "user_cases.jsonl"
+    data_path = PROJECT_ROOT / "InjecAgent" / "data" / "user_cases_copy.jsonl"
     lines = data_path.read_text(encoding="utf-8").splitlines()
     cases = [json.loads(line) for line in lines]
 
