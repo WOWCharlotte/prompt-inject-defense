@@ -80,6 +80,7 @@ class IntentShield:
                 store=self._store,
                 reranker=reranker,
                 top_k=config.top_k,
+                relevance_threshold=config.rag_relevance_threshold,
             )
             self._reflector = Reflector(llm=self._llm, store=self._store)
 

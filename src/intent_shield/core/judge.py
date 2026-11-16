@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from intent_shield.core.decision import make_decision, parse_judge_response
+from intent_shield.core.decision import make_decision
 from intent_shield.core.prompt import build_judge_prompt
 from intent_shield.llm.base import BaseLLM
-from intent_shield.types import ReflectionCase, ShieldDecision
+from intent_shield.types import JudgeResponse, JudgeResult, RetrievedCase, ShieldDecision
 
 
 @dataclass
@@ -32,7 +32,7 @@ class IntentJudge:
         user_instruction: str,
         tool_name: str,
         tool_params: dict,
-        rag_cases: list[ReflectionCase] | None = None,
+        rag_cases: list[RetrievedCase] | None = None,
     ) -> ShieldDecision:
         """Evaluate intent alignment between user instruction and tool call."""
         trace = self.judge_with_trace(user_instruction, tool_name, tool_params, rag_cases)
@@ -43,7 +43,7 @@ class IntentJudge:
         user_instruction: str,
         tool_name: str,
         tool_params: dict,
-        rag_cases: list[ReflectionCase] | None = None,
+        rag_cases: list[RetrievedCase] | None = None,
     ) -> JudgeTrace:
         """Evaluate intent alignment and return full trace (prompt + response)."""
         rag_cases = rag_cases or []
@@ -56,8 +56,13 @@ class IntentJudge:
             rag_cases=rag_cases,
         )
 
-        raw_response = self.llm.chat_sync(messages, temperature=0.0)
-        judge_result = parse_judge_response(raw_response)
+        parsed, raw_response = self.llm.parse_sync(
+            messages, text_format=JudgeResponse, temperature=0.0
+        )
+        judge_result = JudgeResult(
+            thought=parsed.thought,
+            risk_score=parsed.risk_score,
+        )
 
         decision = make_decision(
             judge_result=judge_result,

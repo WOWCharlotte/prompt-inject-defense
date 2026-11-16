@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from intent_shield.types import JudgeResult, ReflectionCase, RiskLevel, ShieldDecision
+from intent_shield.types import JudgeResult, RetrievedCase, RiskLevel, ShieldDecision
 
 
 def parse_judge_response(raw_response: str) -> JudgeResult:
@@ -15,22 +15,14 @@ def parse_judge_response(raw_response: str) -> JudgeResult:
         return JudgeResult(
             thought="Failed to parse LLM response: " + raw_response[:200],
             risk_score=0.8,
-            decision=RiskLevel.DANGEROUS,
         )
 
     risk_score = float(data.get("risk_score", 0.8))
     risk_score = max(0.0, min(1.0, risk_score))
 
-    decision_str = data.get("decision", "dangerous").lower()
-    try:
-        decision = RiskLevel(decision_str)
-    except ValueError:
-        decision = RiskLevel.DANGEROUS if risk_score > 0.7 else RiskLevel.SUSPICIOUS
-
     return JudgeResult(
         thought=data.get("thought", ""),
         risk_score=risk_score,
-        decision=decision,
     )
 
 
@@ -85,7 +77,7 @@ def make_decision(
     user_instruction: str,
     tool_name: str,
     tool_params: dict[str, Any],
-    rag_cases: list[ReflectionCase],
+    rag_cases: list[RetrievedCase],
 ) -> ShieldDecision:
     """Apply threshold-based segmented decision logic."""
     score = judge_result.risk_score

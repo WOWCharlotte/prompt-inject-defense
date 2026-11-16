@@ -37,6 +37,7 @@ class ShieldConfig(BaseModel):
     # RAG
     rag_enabled: bool = True  # Set to False to disable RAG retrieval
     top_k: int = 3
+    rag_relevance_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     chroma_persist_dir: str = "./data/chroma_db"
     chroma_collection_name: str = "threat_cases"
 

@@ -10,6 +10,7 @@ IntentShield 通过意图对齐交叉验证和 RAG 驱动的动态反思机制�
 - **RAG 动态反思**: ChromaDB 向量数据库存储历史威胁案例，持续自我进化
 - **可插拔架构**: 装饰器/Hook 模式，零侵入集成任意 Agent 系统
 - **多模型支持**: OpenAI API 兼容，支持 GPT/Qwen/DeepSeek/GLM 等
+- **结构化裁判输出**: 使用 Pydantic 定义响应结构，通过 `responses.parse(text_format=JudgeResponse)` 校验完整输出；裁判服务需支持 Responses API 和结构化输出
 - **双数据集适配器**: InjecAgent + AgentDojo 评估支持
 
 ## 架构概览
@@ -183,6 +184,21 @@ INTENT_SHIELD_EMBED_KEY=sf-...
                                                      ├─ 0.3 ≤ score ≤ 0.7 → Suspicious
                                                      └─ score > 0.7 → Dangerous
 ```
+
+RAG 检索先按工具名称精确过滤，再向量召回最多 20 个候选，并重排序选取最多
+`top_k` 条（默认 3 条）。只保留重排序分数 **严格大于 0.5** 的结果；阈值可通过
+`ShieldConfig(rag_relevance_threshold=0.5)` 配置。余弦相似度用于向量召回排序，
+阈值作用于重排序分数。
+
+`decision.rag_cases` 返回 `RetrievedCase`，包含 `document_id`、完整存储文本 `text`、
+工具名称 `source_tool`、余弦相似度 `similarity_score` 和重排序分数 `rerank_score`。
+提示词直接使用 `text`，分数保留在决策及审计记录中。向量仅用于内部存储和
+相似度检索，不返回给调用方，也不注入模型上下文。
+
+案例文本包含攻击特征、失效原因、防御指南、来源指令、工具名称和工具参数，
+metadata 只存 `source_tool`。使用完整文本的 SHA-256 生成 ID；工具参数中的 JSON
+会先按键排序并统一格式，重复写入不会再次调用 Embedding。既有 UUID 记录仍可
+检索，但不会自动迁移或合并。
 
 ## 反思机制
 

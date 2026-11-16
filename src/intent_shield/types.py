@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RiskLevel(str, Enum):
@@ -17,7 +17,30 @@ class JudgeResult(BaseModel):
 
     thought: str
     risk_score: float = Field(ge=0.0, le=1.0)
-    decision: RiskLevel
+
+
+class RiskAnalysis(BaseModel):
+    """Risk signals required in the judge's structured response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parameter_injection: bool
+    workflow_hijacking: bool
+    data_exfiltration: bool
+    privilege_escalation: bool
+
+
+class JudgeResponse(BaseModel):
+    """Complete model output matching the judge prompt's JSON example."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_goal: str
+    tool_behavior: str
+    thought: str
+    intent_alignment: Literal["direct", "indirect", "drift"]
+    risk_analysis: RiskAnalysis
+    risk_score: float = Field(ge=0.0, le=1.0)
 
 
 class ReflectionCase(BaseModel):
@@ -31,6 +54,16 @@ class ReflectionCase(BaseModel):
     source_params: str = ""
 
 
+class RetrievedCase(BaseModel):
+    """Stored document with dense retrieval and reranking scores."""
+
+    document_id: str
+    text: str
+    source_tool: str
+    similarity_score: float
+    rerank_score: float | None = None
+
+
 class ShieldDecision(BaseModel):
     """Final decision returned to the caller."""
 
@@ -40,7 +73,7 @@ class ShieldDecision(BaseModel):
     tool_name: str
     tool_params: dict[str, Any]
     user_instruction: str
-    rag_cases: list[ReflectionCase] = []
+    rag_cases: list[RetrievedCase] = Field(default_factory=list)
 
 
 class AuditRecord(BaseModel):
